@@ -1,3 +1,5 @@
+require 'jruby/synchronized' if defined?(JRUBY_VERSION)
+
 autoload :OpenSSL, 'openssl'
 autoload :URI, 'uri'
 
@@ -165,7 +167,7 @@ module MQTT
       @read_queue = Queue.new
       @pubacks = {}
       @read_thread = nil
-      @socket_semaphore = Mutex.new
+      @write_semaphore = Mutex.new
       @pubacks_semaphore = Mutex.new
 
       @wait_for_read_func = method(
@@ -244,6 +246,8 @@ module MQTT
           ssl_context.ssl_version = @ssl if @ssl.is_a?(Symbol)
 
           @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, ssl_context)
+          @socket.extend(JRuby::Synchronized) if defined?(JRUBY_VERSION)
+
           @socket.sync_close = true
 
           # Set hostname on secure socket for Server Name Indication (SNI)
@@ -476,12 +480,7 @@ module MQTT
       first_byte_in_packet, data_available_to_read = @wait_for_read_func.call
       if data_available_to_read
         # Yes - read in the packet
-        packet = nil
-        # Only allow one thread to do writes and/or blocking reads to the
-        # socket at a time. Threads could otherwise deadlock.
-        @socket_semaphore.synchronize do
-          packet = MQTT::Packet.read(@socket, first_byte_in_packet)
-        end
+        packet = MQTT::Packet.read(@socket, first_byte_in_packet)
         handle_packet packet
       end
       keep_alive!
@@ -549,10 +548,8 @@ module MQTT
       # Raise exception if we aren't connected
       raise MQTT::NotConnectedException unless connected?
 
-      # Only allow one thread to do writes and/or blocking reads to the
-      # socket at a time. Threads could otherwise deadlock or, in the case
-      # of concurrent writes, interleave data inappropriately.
-      @socket_semaphore.synchronize do
+      # Only allow one thread to write to socket at a time
+      @write_semaphore.synchronize do
         @socket.write(data.to_s)
       end
     end
